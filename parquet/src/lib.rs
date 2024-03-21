@@ -124,6 +124,11 @@ pub mod column;
 experimental!(mod compression);
 experimental!(mod encodings);
 pub mod bloom_filter;
+
+//#[cfg(feature = "encryption")]
+//pub mod encryption;
+experimental!(mod encryption);
+
 pub mod file;
 pub mod record;
 pub mod schema;

@@ -67,6 +67,8 @@ hashbrown = { version = "0.14", default-features = false }
 twox-hash = { version = "1.6", default-features = false }
 paste = { version = "1.0" }
 half = { version = "2.1", default-features = false, features = ["num-traits"] }
+aes-gcm = { version = "0.10.3" , default-features = false,  features = ["std", "aes"]}
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
 [dev-dependencies]
 base64 = { version = "0.22", default-features = false, features = ["std"] }
@@ -82,6 +84,7 @@ arrow = { workspace = true, features = ["ipc", "test_utils", "prettyprint", "jso
 tokio = { version = "1.0", default-features = false, features = ["macros", "rt", "io-util", "fs"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 object_store = { version = "0.9.0", default-features = false, features = ["azure"] }
+aes-gcm = { version = "0.10.3" , default-features = false,  features = ["std", "aes"] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -104,6 +107,7 @@ experimental = []
 async = ["futures", "tokio"]
 # Enable object_store integration
 object_store = ["dep:object_store", "async"]
+#encryption = ["aes-gcm", "base64"]
 
 [[example]]
 name = "read_parquet"

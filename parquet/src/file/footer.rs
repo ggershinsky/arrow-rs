@@ -21,6 +21,8 @@ use crate::format::{ColumnOrder as TColumnOrder, FileMetaData as TFileMetaData};
 use crate::thrift::{TCompactSliceInputProtocol, TSerializable};
 
 use crate::basic::ColumnOrder;
+use crate::encryption::ciphers;
+use crate::encryption::ciphers::{BlockDecryptor, BlockEncryptor};
 
 use crate::errors::{ParquetError, Result};
 use crate::file::{metadata::*, reader::ChunkReader, FOOTER_SIZE, PARQUET_MAGIC};
@@ -67,8 +69,17 @@ pub fn parse_metadata<R: ChunkReader>(chunk_reader: &R) -> Result<ParquetMetaDat
 
 /// Decodes [`ParquetMetaData`] from the provided bytes
 pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
+    let aad: &[u8] = "abcdefgh".as_bytes();
+    let key_code: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+    let mut encryptor = ciphers::GcmBlockEncryptor::new(&key_code);
+    let encrypted_foot = encryptor.encrypt(buf, aad);
+
+    let decryptor = ciphers::GcmBlockDecryptor::new(&key_code);
+    let decrypted_foot = decryptor.decrypt(encrypted_foot.as_ref(), aad);
+
     // TODO: row group filtering
-    let mut prot = TCompactSliceInputProtocol::new(buf);
+    let mut prot = TCompactSliceInputProtocol::new(decrypted_foot.as_ref());
     let t_file_metadata: TFileMetaData = TFileMetaData::read_from_in_protocol(&mut prot)
         .map_err(|e| ParquetError::General(format!("Could not parse metadata: {e}")))?;
     let schema = types::from_thrift(&t_file_metadata.schema)?;
