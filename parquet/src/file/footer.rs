@@ -72,7 +72,7 @@ pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
     let aad: &[u8] = "abcdefgh".as_bytes();
     let key_code: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-    let mut encryptor = ciphers::GcmBlockEncryptor::new(&key_code);
+    let mut encryptor = ciphers::AesGcmGcmBlockEncryptor::new(&key_code);
     let encrypted_foot = encryptor.encrypt(buf, aad);
 
     let decryptor = ciphers::GcmBlockDecryptor::new(&key_code);

@@ -69,6 +69,7 @@ paste = { version = "1.0" }
 half = { version = "2.1", default-features = false, features = ["num-traits"] }
 aes-gcm = { version = "0.10.3" , default-features = false,  features = ["std", "aes"]}
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+ring = { version = "0.17", default-features = false, features = ["std"]}
 
 [dev-dependencies]
 base64 = { version = "0.22", default-features = false, features = ["std"] }
