@@ -90,7 +90,7 @@ pub fn parse_metadata<R: ChunkReader>(chunk_reader: &R) -> Result<ParquetMetaDat
 /// Decodes [`ParquetMetaData`] from the provided bytes
 pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
     // TODO: row group filtering
-    let mut prot = TCompactSliceInputProtocol::new(buf.as_ref());
+    let mut prot = TCompactSliceInputProtocol::new(buf);
     let t_file_metadata: TFileMetaData = TFileMetaData::read_from_in_protocol(&mut prot)
         .map_err(|e| ParquetError::General(format!("Could not parse metadata: {e}")))?;
     let schema = types::from_thrift(&t_file_metadata.schema)?;
@@ -109,7 +109,6 @@ pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
         schema_descr,
         column_orders,
     );
-
     Ok(ParquetMetaData::new(file_metadata, row_groups))
 }
 
@@ -137,7 +136,7 @@ fn decode_encrypted_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
 /// Decodes the footer returning the metadata length in bytes
 pub fn decode_footer(slice: &[u8; FOOTER_SIZE]) -> Result<usize> {
     // check this is indeed a parquet file
-    if slice[4..] != PARQUET_MAGIC && slice[4..] != PARQUET_MAGIC_ENCR_FOOTER {
+    if slice[4..] != PARQUET_MAGIC {
         return Err(general_err!("Invalid Parquet file. Corrupt footer"));
     }
 
