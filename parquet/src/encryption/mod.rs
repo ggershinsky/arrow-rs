@@ -19,5 +19,3 @@
 //! in the [spec](https://github.com/apache/parquet-format/blob/master/Encryption.md).
 
 pub mod ciphers;
-
-const GCM_NONCE_LENGTH: usize = 12;

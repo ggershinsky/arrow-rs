@@ -1411,6 +1411,17 @@ mod tests {
     }
 
     #[test]
+    fn test_uniform_encryption() {
+        let path = format!(
+            "{}/uniform_encryption.parquet.encrypted",
+            arrow::util::test_util::parquet_test_data(),
+        );
+        let file = File::open(path).unwrap();
+        let record_reader = ParquetRecordBatchReader::try_new(file, 128).unwrap();
+        // todo check contents
+    }
+
+    #[test]
     fn test_read_float32_float64_byte_stream_split() {
         let path = format!(
             "{}/byte_stream_split.zstd.parquet",

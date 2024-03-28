@@ -18,16 +18,9 @@
 //! Encryption implementation specific to Parquet, as described
 //! in the [spec](https://github.com/apache/parquet-format/blob/master/Encryption.md).
 
-use crate::encryption::GCM_NONCE_LENGTH;
-use aes_gcm::aead::consts::U12;
-use aes_gcm::aes::Aes128;
-use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
-    Aes128Gcm, AesGcm, Key, Nonce,
-};
-use rand::prelude::*;
 use ring::aead::{Aad, LessSafeKey, NonceSequence, UnboundKey, AES_128_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
+use crate::errors::{ParquetError, Result};
 
 pub trait BlockEncryptor {
     fn encrypt(&mut self, plaintext: &[u8], aad: &[u8]) -> Vec<u8>;
@@ -37,81 +30,10 @@ pub trait BlockDecryptor {
     fn decrypt(&self, length_and_ciphertext: &[u8], aad: &[u8]) -> Vec<u8>;
 }
 
-pub(crate) struct AesGcmGcmBlockEncryptor {
-    rng: ThreadRng,
-    cipher: AesGcm<Aes128, U12>, // todo support other key sizes
-}
-
-impl AesGcmGcmBlockEncryptor {
-    pub(crate) fn new(key_bytes: &[u8]) -> Self {
-        let key_size = key_bytes.len(); //todo check len
-        let key_vec = Vec::from(key_bytes);
-        let key = Key::<Aes128Gcm>::from_slice(&key_vec[..]);
-
-        Self {
-            rng: rand::thread_rng(),
-            cipher: Aes128Gcm::new(&key),
-        }
-    }
-}
-
-impl BlockEncryptor for AesGcmGcmBlockEncryptor {
-    fn encrypt(&mut self, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-        let nonce_buf: [u8; GCM_NONCE_LENGTH] = self.rng.gen();
-        let nonce = Nonce::from_slice(&nonce_buf[..]);
-
-        let plaint_text = Payload {
-            msg: &plaintext[..],
-            aad: &aad[..],
-        };
-
-        match self.cipher.encrypt(&nonce, plaint_text) {
-            Ok(encrypted) => {
-                let len: [u8; 4] = [0; 4];
-                // todo fill len
-                let ctext = [&nonce_buf, &*encrypted].concat();
-                [&len, &*ctext].concat()
-            }
-            Err(e) => panic!("Failed to encrypt {}", e),
-        }
-    }
-}
-
-pub(crate) struct GcmBlockDecryptor {
-    cipher: AesGcm<Aes128, U12>, // todo support other key sizes
-}
-
-impl GcmBlockDecryptor {
-    pub(crate) fn new(key_bytes: &[u8]) -> Self {
-        let key_size = key_bytes.len(); //todo check key len
-        let key_vec = Vec::from(key_bytes);
-        let key = Key::<Aes128Gcm>::from_slice(&key_vec[..]);
-
-        Self {
-            cipher: Aes128Gcm::new(&key),
-        }
-    }
-}
-
-impl BlockDecryptor for GcmBlockDecryptor {
-    fn decrypt(&self, length_and_ciphertext: &[u8], aad: &[u8]) -> Vec<u8> {
-        let nonce = Nonce::from_slice(&length_and_ciphertext[4..16]);
-
-        let cipher_text = Payload {
-            msg: &length_and_ciphertext[16..],
-            aad: &aad[..],
-        };
-
-        match self.cipher.decrypt(&nonce, cipher_text) {
-            Ok(decrypted) => decrypted,
-            Err(e) => panic!("{}", e),
-        }
-    }
-}
-
-const LEFT_FOUR: u128 = 0xffff_ffff_0000_0000_0000_0000_0000_0000;
 const RIGHT_TWELVE: u128 = 0x0000_0000_ffff_ffff_ffff_ffff_ffff_ffff;
 const NONCE_LEN: usize = 12;
+const TAG_LEN: usize = 16;
+const SIZE_LEN: usize = 4;
 
 struct CounterNonce {
     start: u128,
@@ -158,14 +80,15 @@ pub(crate) struct RingGcmBlockEncryptor {
 }
 
 impl RingGcmBlockEncryptor {
-    /// Create a new `RingGcmBlockEncryptor` with a random key and random nonce.
+    // todo TBD: some KMS systems produce data keys, need to be able to pass them to Encryptor.
+    // todo TBD: for other KMSs, we will create data keys inside arrow-rs, making sure to use SystemRandom
+    /// Create a new `RingGcmBlockEncryptor` with a given key and random nonce.
     /// The nonce will advance appropriately with each block encryption and
     /// return an error if it wraps around.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(key_bytes: &[u8]) -> Self {
         let rng = SystemRandom::new();
-        let mut key_bytes = [0; 16];
-        rng.fill(&mut key_bytes).unwrap();
 
+        // todo support other key sizes
         let key = UnboundKey::new(&AES_128_GCM, key_bytes.as_ref()).unwrap();
         let nonce = CounterNonce::new(&rng);
 
@@ -179,14 +102,16 @@ impl RingGcmBlockEncryptor {
 impl BlockEncryptor for RingGcmBlockEncryptor {
     fn encrypt(&mut self, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
         let nonce = self.nonce_sequence.advance().unwrap();
-        let mut result =
-            Vec::with_capacity(plaintext.len() + AES_128_GCM.tag_len() + AES_128_GCM.nonce_len());
+        let ciphertext_len = plaintext.len() + NONCE_LEN + TAG_LEN;
+        // todo TBD: add first 4 bytes with the length, per https://github.com/apache/parquet-format/blob/master/Encryption.md#51-encrypted-module-serialization
+        let mut result = Vec::with_capacity(SIZE_LEN + ciphertext_len);
+        result.extend_from_slice((ciphertext_len as i32).to_le_bytes().as_ref());
         result.extend_from_slice(nonce.as_ref());
         result.extend_from_slice(plaintext);
 
         let tag = self
             .key
-            .seal_in_place_separate_tag(nonce, Aad::from(aad), &mut result[NONCE_LEN..])
+            .seal_in_place_separate_tag(nonce, Aad::from(aad), &mut result[SIZE_LEN + NONCE_LEN..])
             .unwrap();
         result.extend_from_slice(tag.as_ref());
 
@@ -200,27 +125,24 @@ pub(crate) struct RingGcmBlockDecryptor {
 
 impl RingGcmBlockDecryptor {
     pub(crate) fn new(key_bytes: &[u8]) -> Self {
+        // todo support other key sizes
         let key = UnboundKey::new(&AES_128_GCM, key_bytes).unwrap();
 
         Self {
             key: LessSafeKey::new(key),
         }
     }
-
-    fn new_from_less_safe_key(key: LessSafeKey) -> Self {
-        Self { key }
-    }
 }
 
 impl BlockDecryptor for RingGcmBlockDecryptor {
     fn decrypt(&self, length_and_ciphertext: &[u8], aad: &[u8]) -> Vec<u8> {
         let mut result = Vec::with_capacity(
-            length_and_ciphertext.len() - AES_128_GCM.tag_len() - AES_128_GCM.nonce_len(),
+            length_and_ciphertext.len() - SIZE_LEN - NONCE_LEN - TAG_LEN,
         );
-        result.extend_from_slice(&length_and_ciphertext[AES_128_GCM.nonce_len()..]);
+        result.extend_from_slice(&length_and_ciphertext[SIZE_LEN + NONCE_LEN..]);
 
         let nonce = ring::aead::Nonce::try_assume_unique_for_key(
-            &length_and_ciphertext[0..AES_128_GCM.nonce_len()],
+            &length_and_ciphertext[SIZE_LEN..SIZE_LEN + NONCE_LEN],
         )
         .unwrap();
 
@@ -232,93 +154,74 @@ impl BlockDecryptor for RingGcmBlockDecryptor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        hint::black_box,
-        time::{Duration, Instant},
-    };
+pub(crate) enum ModuleType {
+    Footer = 0,
+    ColumnMetaData = 1,
+    DataPage = 2,
+    DictionaryPage = 3,
+    DataPageHeader = 4,
+    DictionaryPageHeader = 5,
+    ColumnIndex = 6,
+    OffsetIndex = 7,
+    BloomFilterHeader = 8,
+    BloomFilterBitset = 9,
+}
 
-    use ring::aead::{Aad, LessSafeKey, UnboundKey, AES_128_GCM};
+pub fn create_footer_aad(file_aad: &[u8]) -> Result<Vec<u8>> {
+    create_module_aad(file_aad, ModuleType::Footer, -1, -1, -1)
+}
 
-    #[test]
-    fn bench_ring_encdec() {
-        // Pick a block large enough to avoid measuring start-up cost but small
-        // enough to fit into any reasonable L1 cache
-        const BLOCK_BYTES: usize = 16 * (1 << 10); // 16 KiB
-        let mut input: [u8; BLOCK_BYTES] = [0; BLOCK_BYTES];
-        for i in 0..input.len() {
-            input[i] = i as u8;
-        }
+pub fn create_module_aad(file_aad: &[u8], module_type: ModuleType, row_group_ordinal: i32,
+                     column_ordinal: i32, page_ordinal: i32) -> Result<Vec<u8>> {
 
-        let key = LessSafeKey::new(UnboundKey::new(&AES_128_GCM, b"0123456789abcdef").unwrap());
-        let nonce = || ring::aead::Nonce::assume_unique_for_key([0; 12]);
+    let module_buf = [module_type as u8];
 
-        // Benchmark the decryptor for some amount of time and see how much data has been processed
-        const TEST_MS: usize = 2000;
-        let mut enc_data: usize = 0;
-        let mut dec_data: usize = 0;
-        let mut enc_time: Duration = Duration::from_micros(0);
-        let mut dec_time = Duration::from_micros(0);
-
-        // Warmup
-        for _ in 0..1000 {
-            let tag = black_box(
-                key.seal_in_place_separate_tag(nonce(), Aad::empty(), &mut input)
-                    .unwrap(),
-            );
-
-            black_box(
-                key.open_in_place_separate_tag(nonce(), Aad::empty(), tag, &mut input, 0..)
-                    .unwrap(),
-            );
-        }
-
-        loop {
-            let start = Instant::now();
-            let tag = black_box(
-                key.seal_in_place_separate_tag(
-                    black_box(nonce()),
-                    black_box(Aad::empty()),
-                    black_box(&mut input),
-                )
-                .unwrap(),
-            );
-            enc_time += start.elapsed();
-            enc_data += input.len();
-
-            let start = Instant::now();
-            black_box(
-                key.open_in_place_separate_tag(
-                    black_box(nonce()),
-                    black_box(Aad::empty()),
-                    black_box(tag),
-                    black_box(&mut input),
-                    black_box(0..),
-                )
-                .unwrap(),
-            );
-            dec_time += start.elapsed();
-            dec_data += input.len();
-
-            if enc_time.as_millis() as usize >= TEST_MS && dec_time.as_millis() as usize >= TEST_MS
-            {
-                break;
-            }
-        }
-
-        println!(
-            "Encryption performance: {} MiB processed in {} ms, throughput is {} MiB/s",
-            (enc_data as f32 / (1 << 20) as f32),
-            enc_time.as_millis(),
-            enc_data as f32 / (1 << 20) as f32 / enc_time.as_secs_f32()
-        );
-
-        println!(
-            "Decryption performance: {} MiB processed in {} ms, throughput is {} MiB/s",
-            (dec_data as f32 / (1 << 20) as f32),
-            dec_time.as_millis(),
-            dec_data as f32 / (1 << 20) as f32 / dec_time.as_secs_f32()
-        );
+    if module_buf[0] == (ModuleType::Footer as u8) {
+        let mut aad = Vec::with_capacity(file_aad.len() + 1);
+        aad.extend_from_slice(file_aad);
+        aad.extend_from_slice(module_buf.as_ref());
+        return Ok(aad)
     }
+
+    if row_group_ordinal < 0 {
+        return Err(general_err!("Wrong row group ordinal: {}", row_group_ordinal));
+    }
+    if row_group_ordinal > u16::MAX as i32 {
+        return Err(general_err!("Encrypted parquet files can't have more than {} row groups: {}",
+            u16::MAX, row_group_ordinal));
+    }
+
+    if column_ordinal < 0 {
+        return Err(general_err!("Wrong column ordinal: {}", column_ordinal));
+    }
+    if column_ordinal > u16::MAX as i32 {
+        return Err(general_err!("Encrypted parquet files can't have more than {} columns: {}",
+            u16::MAX, column_ordinal));
+    }
+
+    if module_buf[0] != (ModuleType::DataPageHeader as u8) &&
+        module_buf[0] != (ModuleType::DataPage as u8) {
+        let mut aad = Vec::with_capacity(file_aad.len() + 5);
+        aad.extend_from_slice(file_aad);
+        aad.extend_from_slice(module_buf.as_ref());
+        aad.extend_from_slice((row_group_ordinal as u16).to_le_bytes().as_ref());
+        aad.extend_from_slice((column_ordinal as u16).to_le_bytes().as_ref());
+        return Ok(aad)
+    }
+
+    if page_ordinal < 0 {
+        return Err(general_err!("Wrong column ordinal: {}", page_ordinal));
+    }
+    if page_ordinal > u16::MAX as i32 {
+        return Err(general_err!("Encrypted parquet files can't have more than {} pages in a chunk: {}",
+            u16::MAX, page_ordinal));
+    }
+
+    let mut aad = Vec::with_capacity(file_aad.len() + 7);
+    aad.extend_from_slice(file_aad);
+    aad.extend_from_slice(module_buf.as_ref());
+    aad.extend_from_slice((row_group_ordinal as u16).to_le_bytes().as_ref());
+    aad.extend_from_slice((column_ordinal as u16).to_le_bytes().as_ref());
+    aad.extend_from_slice((page_ordinal as u16).to_le_bytes().as_ref());
+    Ok(aad)
 }

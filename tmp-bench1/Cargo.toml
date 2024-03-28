@@ -1,9 +1,0 @@
-[package]
-name = "gcm-bench"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-aes-gcm = "=0.10.3"
-rand = "0.9.0-alpha.0"
-ring="0.17"
