@@ -225,3 +225,58 @@ pub fn create_module_aad(file_aad: &[u8], module_type: ModuleType, row_group_ord
     aad.extend_from_slice((page_ordinal as u16).to_le_bytes().as_ref());
     Ok(aad)
 }
+
+pub struct FileDecryptionProperties {
+    footer_key: Option<Vec<u8>>
+}
+
+impl FileDecryptionProperties {
+    pub fn builder() -> DecryptionPropertiesBuilder {
+        DecryptionPropertiesBuilder::with_defaults()
+    }
+}
+
+pub struct DecryptionPropertiesBuilder {
+    footer_key: Option<Vec<u8>>
+}
+
+impl DecryptionPropertiesBuilder {
+    pub fn with_defaults() -> Self {
+        Self {
+            footer_key: None
+        }
+    }
+
+    pub fn build(self) -> FileDecryptionProperties {
+        FileDecryptionProperties {
+            footer_key: self.footer_key
+        }
+    }
+
+    // todo decr: doc comment
+    pub fn with_footer_key(mut self, value: Vec<u8>) -> Self {
+        self.footer_key = Some(value);
+        self
+    }
+}
+
+pub struct FileDecryptor {
+    decryption_properties: FileDecryptionProperties,
+    // todo decr: change to BlockDecryptor
+    footer_decryptor: RingGcmBlockDecryptor
+}
+
+impl FileDecryptor {
+    pub(crate) fn new(decryption_properties: FileDecryptionProperties) -> Self {
+        Self {
+            // todo decr: if no key available yet (not set in properties, will be retrieved from metadata)
+            footer_decryptor: RingGcmBlockDecryptor::new(decryption_properties.footer_key.clone().unwrap().as_ref()),
+            decryption_properties: decryption_properties
+        }
+    }
+
+    // todo decr: change to BlockDecryptor
+    pub(crate) fn get_footer_decryptor(self) -> RingGcmBlockDecryptor {
+        self.footer_decryptor
+    }
+}

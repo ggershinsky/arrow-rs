@@ -43,6 +43,7 @@ use crate::file::footer;
 use crate::file::page_index::index_reader;
 pub use filter::{ArrowPredicate, ArrowPredicateFn, RowFilter};
 pub use selection::{RowSelection, RowSelector};
+use crate::encryption::ciphers;
 
 /// A generic builder for constructing sync or async arrow parquet readers. This is not intended
 /// to be used directly, instead you should use the specialization for the type of reader
@@ -250,7 +251,13 @@ impl ArrowReaderMetadata {
     ///
     /// See [`ParquetRecordBatchReaderBuilder::new_with_metadata`] for how this can be used
     pub fn load<T: ChunkReader>(reader: &T, options: ArrowReaderOptions) -> Result<Self> {
-        let mut metadata = footer::parse_metadata(reader)?;
+       // todo
+        let key_code: &[u8] = "0123456789012345".as_bytes();
+        // todo
+        let decryption_properties = ciphers::FileDecryptionProperties::builder()
+            .with_footer_key(key_code.to_vec())
+            .build();
+        let mut metadata = footer::parse_metadata_with_decryption(reader, decryption_properties)?;
         if options.page_index {
             let column_index = metadata
                 .row_groups()
