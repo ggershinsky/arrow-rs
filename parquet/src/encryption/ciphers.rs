@@ -271,7 +271,7 @@ impl FileDecryptor {
         Self {
             // todo decr: if no key available yet (not set in properties, will be retrieved from metadata)
             footer_decryptor: RingGcmBlockDecryptor::new(decryption_properties.footer_key.clone().unwrap().as_ref()),
-            decryption_properties: decryption_properties
+            decryption_properties
         }
     }
 

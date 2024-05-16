@@ -86,14 +86,20 @@ pub fn parse_metadata_with_decryption<R: ChunkReader>(chunk_reader: &R, decr_pro
     let start = file_size - footer_metadata_len as u64;
 
     if encrypted_footer {
-        decode_encrypted_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref(), decr_props)
+        let file_decryptor = FileDecryptor::new(decr_props);
+        decode_encrypted_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref(), file_decryptor)
     } else {
         decode_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref())
     }
 }
 
-/// Decodes [`ParquetMetaData`] from the provided bytes
 pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
+    decode_metadata_with_decryption(buf)
+}
+
+/// Decodes [`ParquetMetaData`] from the provided bytes
+// todo add file decryptor
+pub fn decode_metadata_with_decryption(buf: &[u8]) -> Result<ParquetMetaData> {
     // TODO: row group filtering
     let mut prot = TCompactSliceInputProtocol::new(buf);
     let t_file_metadata: TFileMetaData = TFileMetaData::read_from_in_protocol(&mut prot)
@@ -122,7 +128,7 @@ pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
     Ok(ParquetMetaData::new(file_metadata, row_groups))
 }
 
-fn decode_encrypted_metadata(buf: &[u8], file_decr_props: FileDecryptionProperties) -> Result<ParquetMetaData> {
+fn decode_encrypted_metadata(buf: &[u8], file_decryptor: FileDecryptor) -> Result<ParquetMetaData> {
     // parse FileCryptoMetaData
     let mut prot = TCompactSliceInputProtocol::new(buf.as_ref());
     let t_file_crypto_metadata: TFileCryptoMetaData = TFileCryptoMetaData::read_from_in_protocol(&mut prot)
@@ -130,8 +136,6 @@ fn decode_encrypted_metadata(buf: &[u8], file_decr_props: FileDecryptionProperti
     let algo = t_file_crypto_metadata.encryption_algorithm;
     let aes_gcm_algo = if let EncryptionAlgorithm::AESGCMV1(a) = algo { a }
         else { unreachable!() }; // todo decr: add support for GCMCTRV1
-
-    let file_decryptor = FileDecryptor::new(file_decr_props);
 
     // todo decr: get key_metadata
 
@@ -142,7 +146,8 @@ fn decode_encrypted_metadata(buf: &[u8], file_decr_props: FileDecryptionProperti
     let fmd_aad = ciphers::create_footer_aad(aes_gcm_algo.aad_file_unique.unwrap().as_ref());
     let decrypted_fmd_buf = decryptor.decrypt(prot.as_slice().as_ref(), fmd_aad.unwrap().as_ref());
 
-    decode_metadata(decrypted_fmd_buf.as_slice())
+    // todo add file decryptor
+    decode_metadata_with_decryption(decrypted_fmd_buf.as_slice())
 }
 
 // todo decr: add encryption support
