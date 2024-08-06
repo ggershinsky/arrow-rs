@@ -43,6 +43,8 @@ use crate::file::footer;
 use crate::file::page_index::index_reader;
 pub use filter::{ArrowPredicate, ArrowPredicateFn, RowFilter};
 pub use selection::{RowSelection, RowSelector};
+use crate::encryption::ciphers;
+use crate::encryption::ciphers::FileDecryptionProperties;
 
 /// A generic builder for constructing sync or async arrow parquet readers. This is not intended
 /// to be used directly, instead you should use the specialization for the type of reader
@@ -250,7 +252,12 @@ impl ArrowReaderMetadata {
     ///
     /// See [`ParquetRecordBatchReaderBuilder::new_with_metadata`] for how this can be used
     pub fn load<T: ChunkReader>(reader: &T, options: ArrowReaderOptions) -> Result<Self> {
-        let mut metadata = footer::parse_metadata(reader)?;
+        Self::load_with_decryption(reader, options, FileDecryptionProperties::builder().build())
+    }
+
+    pub fn load_with_decryption<T: ChunkReader>(reader: &T, options: ArrowReaderOptions,
+                                file_decryption_properties: FileDecryptionProperties) -> Result<Self> {
+        let mut metadata = footer::parse_metadata_with_decryption(reader, file_decryption_properties)?;
         if options.page_index {
             let column_index = metadata
                 .row_groups()
@@ -355,6 +362,11 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
     /// Create a new [`ParquetRecordBatchReaderBuilder`] with [`ArrowReaderOptions`]
     pub fn try_new_with_options(reader: T, options: ArrowReaderOptions) -> Result<Self> {
         let metadata = ArrowReaderMetadata::load(&reader, options)?;
+        Ok(Self::new_with_metadata(reader, metadata))
+    }
+
+    pub fn try_new_with_decryption(reader: T, options: ArrowReaderOptions, file_decryption_properties: FileDecryptionProperties) -> Result<Self> {
+        let metadata = ArrowReaderMetadata::load_with_decryption(&reader, options, file_decryption_properties)?;
         Ok(Self::new_with_metadata(reader, metadata))
     }
 
@@ -606,6 +618,13 @@ impl ParquetRecordBatchReader {
             .build()
     }
 
+    pub fn try_new_with_decryption<T: ChunkReader + 'static>(reader: T, batch_size: usize,
+                                                             file_decryption_properties: FileDecryptionProperties) -> Result<Self> {
+        ParquetRecordBatchReaderBuilder::try_new_with_decryption(reader, Default::default(), file_decryption_properties)?
+            .with_batch_size(batch_size)
+            .build()
+    }
+
     /// Create a new [`ParquetRecordBatchReader`] from the provided [`RowGroups`]
     ///
     /// Note: this is a low-level interface see [`ParquetRecordBatchReader::try_new`] for a
@@ -770,6 +789,7 @@ mod tests {
         BoolType, ByteArray, ByteArrayType, DataType, FixedLenByteArray, FixedLenByteArrayType,
         FloatType, Int32Type, Int64Type, Int96Type,
     };
+    use crate::encryption::ciphers;
     use crate::errors::Result;
     use crate::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
     use crate::file::writer::SerializedFileWriter;
@@ -1408,6 +1428,23 @@ mod tests {
         assert_eq!(col.value(1), f16::ZERO);
         assert!(col.value(1).is_sign_positive());
         assert!(col.value(2).is_nan());
+    }
+
+    #[test]
+    fn test_uniform_encryption() {
+        let path = format!(
+            "{}/uniform_encryption.parquet.encrypted",
+            arrow::util::test_util::parquet_test_data(),
+        );
+        let file = File::open(path).unwrap();
+        // todo
+        let key_code: &[u8] = "0123456789012345".as_bytes();
+        // todo
+        let decryption_properties = ciphers::FileDecryptionProperties::builder()
+            .with_footer_key(key_code.to_vec())
+            .build();
+        let record_reader = ParquetRecordBatchReader::try_new_with_decryption(file, 128, decryption_properties).unwrap();
+        // todo check contents
     }
 
     #[test]

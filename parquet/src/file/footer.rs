@@ -17,13 +17,17 @@
 
 use std::{io::Read, sync::Arc};
 
-use crate::format::{ColumnOrder as TColumnOrder, FileMetaData as TFileMetaData};
+use crate::format::{ColumnOrder as TColumnOrder, FileMetaData as TFileMetaData,
+                    FileCryptoMetaData as TFileCryptoMetaData, EncryptionAlgorithm};
 use crate::thrift::{TCompactSliceInputProtocol, TSerializable};
 
 use crate::basic::ColumnOrder;
+use crate::encryption::ciphers;
+use crate::encryption::ciphers::{BlockDecryptor, FileDecryptionProperties, FileDecryptor};
 
 use crate::errors::{ParquetError, Result};
-use crate::file::{metadata::*, reader::ChunkReader, FOOTER_SIZE, PARQUET_MAGIC};
+use crate::file::{metadata::*, reader::ChunkReader,
+                  FOOTER_SIZE, PARQUET_MAGIC, PARQUET_MAGIC_ENCR_FOOTER};
 
 use crate::schema::types::{self, SchemaDescriptor};
 
@@ -36,6 +40,10 @@ use crate::schema::types::{self, SchemaDescriptor};
 /// The reader first reads DEFAULT_FOOTER_SIZE bytes from the end of the file.
 /// If it is not enough according to the length indicated in the footer, it reads more bytes.
 pub fn parse_metadata<R: ChunkReader>(chunk_reader: &R) -> Result<ParquetMetaData> {
+    parse_metadata_with_decryption(chunk_reader, FileDecryptionProperties::builder().build())
+}
+
+pub fn parse_metadata_with_decryption<R: ChunkReader>(chunk_reader: &R, decr_props: FileDecryptionProperties) -> Result<ParquetMetaData> {
     // check file is large enough to hold footer
     let file_size = chunk_reader.len();
     if file_size < (FOOTER_SIZE as u64) {
@@ -49,7 +57,21 @@ pub fn parse_metadata<R: ChunkReader>(chunk_reader: &R) -> Result<ParquetMetaDat
         .get_read(file_size - 8)?
         .read_exact(&mut footer)?;
 
-    let metadata_len = decode_footer(&footer)?;
+    let encrypted_footer;
+    // check this is indeed a parquet file
+    if footer[4..] == PARQUET_MAGIC {
+        encrypted_footer = false;
+    } else if footer[4..] == PARQUET_MAGIC_ENCR_FOOTER {
+        encrypted_footer = true;
+        //panic!() // todo rm
+    } else {
+        return Err(general_err!("Invalid Parquet file. Corrupt footer"));
+    }
+
+    // get the metadata length from the footer
+    let metadata_len = u32::from_le_bytes(footer[..4].try_into().unwrap()) as usize;
+
+    //let metadata_len = decode_footer(&footer)?; todo rm this function
     let footer_metadata_len = FOOTER_SIZE + metadata_len;
 
     if footer_metadata_len > file_size as usize {
@@ -62,11 +84,22 @@ pub fn parse_metadata<R: ChunkReader>(chunk_reader: &R) -> Result<ParquetMetaDat
     }
 
     let start = file_size - footer_metadata_len as u64;
-    decode_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref())
+
+    if encrypted_footer {
+        let file_decryptor = FileDecryptor::new(decr_props);
+        decode_encrypted_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref(), file_decryptor)
+    } else {
+        decode_metadata(chunk_reader.get_bytes(start, metadata_len)?.as_ref())
+    }
+}
+
+pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
+    decode_metadata_with_decryption(buf)
 }
 
 /// Decodes [`ParquetMetaData`] from the provided bytes
-pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
+// todo add file decryptor
+pub fn decode_metadata_with_decryption(buf: &[u8]) -> Result<ParquetMetaData> {
     // TODO: row group filtering
     let mut prot = TCompactSliceInputProtocol::new(buf);
     let t_file_metadata: TFileMetaData = TFileMetaData::read_from_in_protocol(&mut prot)
@@ -79,6 +112,11 @@ pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
     }
     let column_orders = parse_column_orders(t_file_metadata.column_orders, &schema_descr);
 
+    if t_file_metadata.encryption_algorithm.is_some() {
+        // todo get key_metadata etc. Set file decryptor in return value
+        // todo check signature
+    }
+
     let file_metadata = FileMetaData::new(
         t_file_metadata.version,
         t_file_metadata.num_rows,
@@ -90,6 +128,29 @@ pub fn decode_metadata(buf: &[u8]) -> Result<ParquetMetaData> {
     Ok(ParquetMetaData::new(file_metadata, row_groups))
 }
 
+fn decode_encrypted_metadata(buf: &[u8], file_decryptor: FileDecryptor) -> Result<ParquetMetaData> {
+    // parse FileCryptoMetaData
+    let mut prot = TCompactSliceInputProtocol::new(buf.as_ref());
+    let t_file_crypto_metadata: TFileCryptoMetaData = TFileCryptoMetaData::read_from_in_protocol(&mut prot)
+        .map_err(|e| ParquetError::General(format!("Could not parse crypto metadata: {e}")))?;
+    let algo = t_file_crypto_metadata.encryption_algorithm;
+    let aes_gcm_algo = if let EncryptionAlgorithm::AESGCMV1(a) = algo { a }
+        else { unreachable!() }; // todo decr: add support for GCMCTRV1
+
+    // todo decr: get key_metadata
+
+    // remaining buffer contains encrypted FileMetaData
+    let decryptor = file_decryptor.get_footer_decryptor();
+    // todo decr: get aad_prefix
+    // todo decr: set both aad_prefix and aad_file_unique in file_decryptor
+    let fmd_aad = ciphers::create_footer_aad(aes_gcm_algo.aad_file_unique.unwrap().as_ref());
+    let decrypted_fmd_buf = decryptor.decrypt(prot.as_slice().as_ref(), fmd_aad.unwrap().as_ref());
+
+    // todo add file decryptor
+    decode_metadata_with_decryption(decrypted_fmd_buf.as_slice())
+}
+
+// todo decr: add encryption support
 /// Decodes the footer returning the metadata length in bytes
 pub fn decode_footer(slice: &[u8; FOOTER_SIZE]) -> Result<usize> {
     // check this is indeed a parquet file
